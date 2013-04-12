@@ -7,7 +7,6 @@ import numpy as np
 from numpy import array
 import math
 import mcBlockData
-import scipy.optimize as scop
 
 epsilon = 1e-5
 
@@ -124,9 +123,12 @@ class Tri2Voxel:
 						b = self.geom_vc2c(y,1)
 						c = self.geom_vc2c(z,2)
 
-						self.arr3d_id[a,b,c] = mat
-						self.arr3d_dt[a,b,c] = dat
-						self.voxchg += 1
+						try:
+							self.arr3d_id[a,b,c] = mat
+							self.arr3d_dt[a,b,c] = dat
+							self.voxchg += 1
+						except IndexError:
+							pass #print("Warning: couldn't index (%d,%d,%d) in output matrices" % (a,b,c))
 	
 	def geom_findnonplanar(self,normal):
 		for omit in [2, 1, 0]:
@@ -346,6 +348,95 @@ class Tri2Voxel:
 				data, damage = mcBlockData.nearest(int(pixel[0]),int(pixel[1]),int(pixel[2]))
 		return [data, damage]
 
+def recurse_model(model,mode,ind):
+	for node in model.scenes[0].nodes:
+		ind = recurse_dive(node,mode,None,ind)
+	return ind
+
+def recurse_dive(node,mode,xform,ind):
+	xform2 = None
+
+	# Deal with fetching and possibly combining transforms
+	if node.transforms:
+		xform2 = node.transforms[0].matrix
+		if None != xform:
+			xform = np.dot(xform,xform2)
+		else:
+			xform = xform2
+
+	# Deal with the geometry, if it has any
+	for child in node.children:
+		if isinstance(child,collada.scene.NodeNode):
+			ind = recurse_dive(child.node,mode,xform,ind)
+		elif isinstance(child,collada.scene.Node):
+			ind = recurse_dive(child,mode,xform,ind)
+		elif isinstance(child,collada.scene.GeometryNode):
+			ind = recurse_geometry(child.geometry,mode,xform,ind)
+		else:
+			print xform
+			print("Found an unknown %s" % (type(child)))
+	return ind
+
+def recurse_geometry(node,mode,xform,ind):
+	if mode == 'extents':
+		mins, maxs = ind
+		for triset in node.primitives:
+			if not(isinstance(triset,collada.triangleset.TriangleSet)):
+				print("Warning: ignoring primitive of type %s" % type(triset))
+				continue
+
+			# Apply the transform, if there is one
+			v = np.copy(triset.vertex)
+			if None != xform:
+				v.resize((v.shape[0],1+v.shape[1]))
+				v[:,3] = 1.
+				v = v.transpose()
+				v = np.dot(xform,v)
+				v = v.transpose()
+			
+			maxs = array([max(maxs[0],np.max(v[:,0])), \
+			              max(maxs[1],np.max(v[:,1])), \
+			              max(maxs[2],np.max(v[:,2]))])
+			mins = array([min(mins[0],np.min(v[:,0])), \
+			              min(mins[1],np.min(v[:,1])), \
+			              min(mins[2],np.min(v[:,2]))])
+
+		print("Scanned geometry '%s' for extents" % node.name)
+		return [mins, maxs]
+
+	elif mode == 'convert':
+		for triset in node.primitives:
+			if not(isinstance(triset,collada.triangleset.TriangleSet)):
+				print("Warning: ignoring primitive of type %s" % type(triset))
+				continue
+
+			trilist = list(triset)
+			for tri in trilist:
+				# Apply the transform, if there is one
+				otv = tri.vertices
+				if None != xform:
+					tv = np.copy(tri.vertices)
+					oshape = tv.shape
+					#print("Resizing to %s" % str((tv.shape[0],1+tv.shape[1])))
+					tv = np.resize(tv,(tv.shape[0],1+tv.shape[1]))
+					tv[:,3] = 1.
+					tv = tv.transpose()
+					tv = np.dot(xform,tv)
+					#print tv
+					tv = tv[:3,:]
+					tv = tv.transpose()
+					#print tv
+					tri.vertices = tv
+			
+				ind.geom_tri2voxel(tri)
+				tri.vertices = otv
+
+		print("Converted geometry '%s'" % node.name)
+	else:
+		print("Warning: skipping geometry for unknown mode '%s'" % mode)
+	return ind
+	
+
 def main():
 	if len(sys.argv) < 2:
 		print("Usage: %s <KMZ_file>" % sys.argv[0])
@@ -357,17 +448,11 @@ def main():
 
 	maxs = array([-1e99,-1e99,-1e99])
 	mins = array([ 1e99, 1e99, 1e99])
-	for geom in model.geometries:
-		for triset in geom.primitives:
-			maxs = array([max(maxs[0],np.max(triset.vertex[:,0])), \
-			              max(maxs[1],np.max(triset.vertex[:,1])), \
-			              max(maxs[2],np.max(triset.vertex[:,2]))])
-			mins = array([min(mins[0],np.min(triset.vertex[:,0])), \
-			              min(mins[1],np.min(triset.vertex[:,1])), \
-			              min(mins[2],np.min(triset.vertex[:,2]))])
-	print("Grabbed extent information from %d geometries" % len(model.geometries))
 
-	# Get some sort of scaling information
+	mins, maxs = recurse_model(model,"extents",[mins,maxs])
+	print("Computed model extents")
+
+# some sort of scaling information
 	scale = [.01,.01,.01]
 	if model.assetInfo != None and model.assetInfo.unitmeter != None:
 		print("This model contains units, %f %s per meter" % (model.assetInfo.unitmeter, model.assetInfo.unitname))
@@ -378,13 +463,7 @@ def main():
 	t2v.scale = array(scale)
 	t2v.geom_prep(mins,maxs)
 
-	for geom in model.geometries:
-		for triset in geom.primitives:
-			trilist = list(triset)
-			for tri in trilist:
-				t2v.geom_tri2voxel(tri)
-		print("Voxelized triangles from geometry '%s'" % geom.name)
-	print("Voxelized triangles from %d geometries" % len(model.geometries))
+	recurse_model(model,"convert",t2v)
 
 	# Print some stats
 	ar1  = np.count_nonzero(t2v.arr3d_id)
