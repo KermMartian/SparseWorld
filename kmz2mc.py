@@ -24,10 +24,10 @@ class Tri2Voxel:
 		self.pxscan = 0
 
 	def geom_prep(self,mins,maxs):
-		self.offset = array([-mins[0],-mins[1],-mins[2]])
-		self.arrdim = (np.ceil((maxs[0]-mins[0])*self.scale[0]+1), \
-		               np.ceil((maxs[1]-mins[1])*self.scale[1]+1), \
-		               np.ceil((maxs[2]-mins[2])*self.scale[2]+1))
+		self.offset = 1-array([mins[0],mins[1],mins[2]])
+		self.arrdim = (np.ceil((maxs[0]-mins[0])*self.scale[0]+2), \
+		               np.ceil((maxs[1]-mins[1])*self.scale[1]+2), \
+		               np.ceil((maxs[2]-mins[2])*self.scale[2]+2))
 		print("Reserving %d x %d x %d array..." % (self.arrdim[0], self.arrdim[1], self.arrdim[2]))
 		self.arr3d_id = np.zeros(self.arrdim)
 		self.arr3d_dt = np.zeros(self.arrdim)
@@ -63,103 +63,130 @@ class Tri2Voxel:
 		tv = tv + self.tvoffset
 		tv = tv * self.tvscale
 
-		# Step 3: Find the triangle's "dimensions" along each axis
-		xyzs = zip(*tv)
-		spanx = max(xyzs[0])-min(xyzs[0])
-		spany = max(xyzs[1])-min(xyzs[1])
-		spanz = max(xyzs[2])-min(xyzs[2])
+		# Step 3: Find the length of each side
+		indices=np.arange(3)
+		oboe = (indices+1)%3
+		# First get surface normal and edge lengths! :)
+		# e = tv[oboe] - tv[indices] # <- cool way to do it
+		e = array([tv[oboe[i]] - tv[i] for i in indices]) # <- boring way
 
-		# Step 4: Do some sort of preprocessing to find tm/ti/tt coordinates
-		txc = None
-		if tt and ti:
-			txs = ti.uintarray.shape
-			txc = np.dot(tt[0],array([[txs[1],0],[0,txs[0]]]))
+		#L1=np.linalg.norm(e1)
+		#L2=np.linalg.norm(e2)
+		#L3=np.linalg.norm(e3)
+		L = np.apply_along_axis(np.linalg.norm,-1,e)
 
-		# Step 5: Find volume the triangle lies inside
-		xrng = [self.geom_c2vcd(min(xyzs[0]),0), self.geom_c2vcu(max(xyzs[0]),0)]
-		yrng = [self.geom_c2vcd(min(xyzs[1]),1), self.geom_c2vcu(max(xyzs[1]),1)]
-		zrng = [self.geom_c2vcd(min(xyzs[2]),2), self.geom_c2vcu(max(xyzs[2]),2)]
-		xs = np.linspace(xrng[0],xrng[1],xrng[1]-xrng[0]+1)
-		ys = np.linspace(yrng[0],yrng[1],yrng[1]-yrng[0]+1)
-		zs = np.linspace(zrng[0],zrng[1],zrng[1]-zrng[0]+1)
+		snorm = np.cross(e[1],e[0])
+		slen  = np.linalg.norm(snorm)
+		if slen == 0:
+			print("Discarding triangle with point normal")
+			return
+		snorm = snorm/slen
 
-		# Step 6: Determine major, submajor, and minor axes
-		attempts = [0, 0, 0]
-		axismode = 0
-		axispass = False
+		Linc = 1 /L
+		Lspan = np.ceil(L)
+		Lspaces = [np.linspace(0,1,1+Lspan[i]) for i in indices]
+		bary_coords = np.zeros(3)
+		for i,j in np.vstack((indices,oboe)).transpose():
+			for ca in Lspaces[i]:
+				for cb in Lspaces[j]:
+					if ca+cb > 1:
+						break
+					bary_coords.fill(1 - ca - cb)
+					bary_coords[i] = ca
+					bary_coords[j] = cb
+					# here we will need to have calculated matrices
+					# to take us from barycentric coords to 3-space
+					# Cast ray must take two args, src and dir
+					# and moves from src to src+dir
+					cart_coords = self.geom_makecart(tv,bary_coords)
+					self.castraythroughvoxels(cart_coords,snorm) 
 	
-		if spanz < spanx and spanz < spany:
-			axismode = 0
-		elif spany < spanx and spany < spanz:
-			axismode = 1
-		else:
-			axismode = 2
+	def castraythroughvoxels(self,origin,direction,radius=1):
+		# Cube containing origin point.
+		x = origin[0] #np.floor(origin[0]);
+		y = origin[1] #np.floor(origin[1]);
+		z = origin[2] #np.floor(origin[2]);
+		# Break out direction vector.
+		dx = direction[0] if abs(direction[0]) != 0 else 0.
+		dy = direction[1] if abs(direction[1]) != 0 else 0.
+		dz = direction[2] if abs(direction[2]) != 0 else 0.
+		# Direction to increment x,y,z when stepping.
+		stepX = self.signum(dx);
+		stepY = self.signum(dy);
+		stepZ = self.signum(dz);
+		# See description above. The initial values depend on the fractional
+		# part of the origin.
+		tMaxX = self.intbound(origin[0], dx);
+		tMaxY = self.intbound(origin[1], dy);
+		tMaxZ = self.intbound(origin[2], dz);
+		# The change in t when taking a step (always positive).
+		tDeltaX = stepX/dx if dx != 0 else np.inf;
+		tDeltaY = stepY/dy if dy != 0 else np.inf;
+		tDeltaZ = stepZ/dz if dz != 0 else np.inf;
 
-		while not(axispass) and sum(attempts) < len(attempts):
-			attempts[axismode] = 1
+		# Avoids an infinite loop.
+		if dx == 0 and dy == 0 and dz == 0:
+			print("Warning: direction vector cast in zero direction")
+			return
 
-			if axismode == 0:
-				majax = 0
-				smjax = 1
-				minax = 2
-			elif axismode == 1:
-				majax = 0
-				smjax = 2
-				minax = 1
-			elif axismode == 2:
-				majax = 1
-				smjax = 2
-				minax = 0
+		# Rescale from units of 1 cube-edge to units of 'direction' so we can
+		# compare with 't'.
+		radius /= math.sqrt(dx*dx+dy*dy+dz*dz);
 
-			if (tv[0,majax] == tv[1,majax] and tv[0,smjax] == tv[1,smjax]) or \
-			   (tv[1,majax] == tv[2,majax] and tv[1,smjax] == tv[2,smjax]) or \
-			   (tv[2,majax] == tv[0,majax] and tv[2,smjax] == tv[0,smjax]):
-				# Deal with degenerate triangle
-				print("***This triangle will be degenerate***")
-				axismode = (axismode+1)%3
-				# Fine-grained axis spacing
-				axisspace = 1 + max(xrng[1]-xrng[0],yrng[1]-yrng[0],zrng[1]-zrng[0])
-				xs = np.linspace(xrng[0],xrng[1],axisspace)
-				ys = np.linspace(yrng[0],yrng[1],axisspace)
-				zs = np.linspace(zrng[0],zrng[1],axisspace)
+		while 1:
+
+			# Invoke the callback, unless we are not *yet* within the bounds of the world
+			if not(x < 0 or y < 0 or z < 0):
+				#print("Block at %f %f %f" % (np.floor(x), np.floor(y), np.floor(z)))
+				self.voxchg += 1
+				self.arr3d_id[x,y,z] = 1
+				self.arr3d_dt[x,y,z] = 1
+
+			# tMaxX stores the t-value at which we cross a cube boundary along the
+			# X axis, and similarly for Y and Z. Therefore, choosing the least tMax
+			# chooses the closest cube boundary. Only the first case of the four
+			# has been commented in detail.
+			if tMaxX < tMaxY:
+				if tMaxX < tMaxZ:
+					if tMaxX > radius:
+						break
+					# Update which cube we are now in.
+					x += stepX
+					# Adjust tMaxX to the next X-oriented boundary crossing.
+					tMaxX += tDeltaX
+					# Record the normal vector of the cube face we entered.
+					continue
 			else:
-				axispass = True
+				if tMaxY < tMaxZ:
+					if tMaxY > radius:
+						break
+					y += stepY
+					tMaxY += tDeltaY
+					continue
 
-		# Set up the array of coordinates here in case we set fine-grained spacing
-		vol = [xs,ys,zs]
+			if tMaxZ > radius:
+				break;
+			z += stepZ
+			tMaxZ += tDeltaZ
 
-		# Step 7: Perform the voxelization
-		voxstart = self.voxchg
-		# Iterate over the XY, XZ, or YZ plane
-		for fixa in [0.0, 0.1, -0.1, 0.2, -0.2, 0.3, -0.3]:
-			for fixb in [0.0, 0.1, -0.1, 0.2, -0.2, 0.3, -0.3]:
-				for ca in fixa + vol[majax]:
-					for cb in fixb + vol[smjax]:
-						x0 = ca if majax == 0 else None
-						y0 = ca if majax == 1 else (cb if smjax == 1 else None)
-						z0 = cb if smjax == 2 else None
+	def intbound(self, s, ds):
+		if ds < 0:
+			return self.intbound(-s, -ds)
+		elif ds == 0:
+			return np.inf
+		else:
+			s = self.modulus(s, 1)
+			return (1-s)/ds
 
-						x1, y1, z1, filled = self.geom_bary(tv, x0, y0, z0)
+	def signum(self, x):
+		return 1 if x > 0 else (0 if abs(x) == 0 else -1)
 
-						if filled:
-							mat, dat = self.geom_mat(tv,x0,y0,z0,ti,txc,majax,smjax,minax)
-							a = self.geom_vc2c(x1,0)
-							b = self.geom_vc2c(y1,1)
-							c = self.geom_vc2c(z1,2)
-							self.arr3d_id[a,b,c] = mat
-							self.arr3d_dt[a,b,c] = dat
-							self.voxchg += 1
-				if self.voxchg - voxstart > 0:
-					break
-			if self.voxchg - voxstart > 0:
-				break
+	def modulus(self, value, modulus):
+		return (value % modulus + modulus) % modulus
+		
+	def geom_makecart(self,tri,bary):
+		return tri[0]*bary[0]+tri[1]*bary[1]+tri[2]*bary[2]
 
-		if self.voxchg - voxstart == 0:
-			print("Warning: No voxels were set for this tri (thin tri issue?)")
-			print(tv)
-			print(vol)
-			print("-------")
-	
 	def geom_c2vcd(self,coord,axis):
 		return round(coord + self.voffset[axis]) - 0.5
 
@@ -168,6 +195,10 @@ class Tri2Voxel:
 
 	def geom_vc2c(self,coord,axis):
 		return np.round(coord - self.voffset[axis] - 0.5)
+
+	def geom_eucdist(self,p1,p2):
+		s = (p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2
+		return math.sqrt(s)
 
 	def geom_cart2bary_elf(self,tri,x,y,z):
 		if x == None:
