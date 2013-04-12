@@ -9,7 +9,7 @@ import math
 import mcBlockData
 import scipy.optimize as scop
 
-epsilon = 1e-2
+epsilon = 1e-5
 
 class Tri2Voxel:
 
@@ -63,7 +63,7 @@ class Tri2Voxel:
 		tv = tv + self.tvoffset
 		tv = tv * self.tvscale
 
-		# Step 3: Find the length of each side
+		# Step 3: Find the length of each side, compute normal
 		indices=np.arange(3)
 		oboe = (indices+1)%3
 		# First get surface normal and edge lengths! :)
@@ -82,10 +82,23 @@ class Tri2Voxel:
 			return
 		snorm = snorm/slen
 
+		# Step 4: Do some sort of preprocessing to find tm/ti/tt coordinates
+		txc = None
+		if tt and ti:
+			txs	= ti.uintarray.shape
+			txc = np.dot(tt[0],array([[txs[1],0],[0,txs[0]]]))
+
+		# Step 5: Iterate over this triangle
 		Linc = 1 /L
 		Lspan = np.ceil(L)
 		Lspaces = [np.linspace(0,1,1+Lspan[i]) for i in indices]
 		bary_coords = np.zeros(3)
+
+		omitaxis = self.geom_findnonplanar(snorm)			# For texturing
+		majax = 1 if omitaxis == 0 else 0
+		smjax = 2 if omitaxis != 2 else 1
+		minax = omitaxis
+
 		for i,j in np.vstack((indices,oboe)).transpose():
 			for ca in Lspaces[i]:
 				for cb in Lspaces[j]:
@@ -99,9 +112,32 @@ class Tri2Voxel:
 					# Cast ray must take two args, src and dir
 					# and moves from src to src+dir
 					cart_coords = self.geom_makecart(tv,bary_coords)
-					self.castraythroughvoxels(cart_coords,snorm) 
+					voxels = self.castraythroughvoxels(cart_coords,snorm) 
+					for voxel in voxels:
+						old = np.copy(voxel)
+						voxel[omitaxis] = None
+						x, y, z = voxel
+						mat, dat = self.geom_mat(tv,x,y,z,ti,txc,majax,smjax,minax)
+
+						x, y, z = old
+						a = self.geom_vc2c(x,0)
+						b = self.geom_vc2c(y,1)
+						c = self.geom_vc2c(z,2)
+
+						self.arr3d_id[a,b,c] = mat
+						self.arr3d_dt[a,b,c] = dat
+						self.voxchg += 1
 	
+	def geom_findnonplanar(self,normal):
+		for omit in [2, 1, 0]:
+			norm = array([0., 0., 0.])
+			norm[omit] = 1.
+			if epsilon < abs(np.dot(normal,norm)):
+				return omit
+			
 	def castraythroughvoxels(self,origin,direction,radius=1):
+		rvals = []
+
 		# Cube containing origin point.
 		x = origin[0] #np.floor(origin[0]);
 		y = origin[1] #np.floor(origin[1]);
@@ -138,9 +174,7 @@ class Tri2Voxel:
 			# Invoke the callback, unless we are not *yet* within the bounds of the world
 			if not(x < 0 or y < 0 or z < 0):
 				#print("Block at %f %f %f" % (np.floor(x), np.floor(y), np.floor(z)))
-				self.voxchg += 1
-				self.arr3d_id[x,y,z] = 1
-				self.arr3d_dt[x,y,z] = 1
+				rvals.append(array([x,y,z]))
 
 			# tMaxX stores the t-value at which we cross a cube boundary along the
 			# X axis, and similarly for Y and Z. Therefore, choosing the least tMax
@@ -168,6 +202,8 @@ class Tri2Voxel:
 				break;
 			z += stepZ
 			tMaxZ += tDeltaZ
+
+		return rvals
 
 	def intbound(self, s, ds):
 		if ds < 0:
@@ -200,85 +236,18 @@ class Tri2Voxel:
 		s = (p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2
 		return math.sqrt(s)
 
-	def geom_cart2bary_elf(self,tri,x,y,z):
-		if x == None:
-			a = 1
-			b = 2
-			c = 0
-		elif y == None:
-			a = 0
-			b = 2
-			c = 1
-		else:
-			a = 0
-			b = 1
-			c = 2
-
-		reindex = array([a,b,c])
-		trimatrix = np.matrix(tri[reindex]).transpose()  
-		#instead of trimatrix = matrix(tris).transpose()
-		P = np.matrix([[x],[y],[z]])[reindex]
-		#instead of P =matrix([[x],[y],[z]])
-
-		offset = trimatrix[:,0]
-		centered = trimatrix - offset # translate to origin
-		theta_x = math.atan2(centered[2,2],centered[1,2])
-		rx = np.matrix([[1,0,0],[0,math.cos(-theta_x),-math.sin(-theta_x)],[0,math.sin(-theta_x),math.cos(-theta_x)]])
-		intermediate1 = rx*centered
-		theta_z = math.atan2(intermediate1[1,2],intermediate1[0,2])
-		rz = np.matrix([[math.cos(-theta_z),-math.sin(-theta_z),0],[math.sin(-theta_z),math.cos(-theta_z),0],[0,0,1]])
-		intermediate2 = rz*intermediate1
-		theta_x2 = math.atan2(intermediate2[2,1],intermediate2[1,1])
-		rx2 = np.matrix([[1,0,0],[0,math.cos(-theta_x2),-math.sin(-theta_x2)],[0,math.sin(-theta_x2),math.cos(-theta_x2)]])
-		planar = rx2*intermediate2
-
-		P[2] = Unknown("z")
-		Pplanar = rx2*rz*rx*(P-offset) 
-
-		# Do something here to set tolerances
-		# and take care of rounding error, if it seems like it matters
-
-		T = np.matrix([[(planar[0,0]-planar[0,2]),(planar[0,1]-planar[0,2])],[(planar[1,0]-planar[1,2]),(planar[1,1]-planar[1,2])]])
-		det = np.linalg.det(T)
-		if det == 0:        # Incoming div-by-0
-			print("Determinant: Div-by-0 warning")
-			return [0., 0., 0., x, y, z]
-		lam12 = np.linalg.inv(T) * (Pplanar[:2]-planar[:2,2])
-		lambda1 = lam12[0,0]
-		lambda2 = lam12[1,0]
-		lambda3 = 1. - lambda1 - lambda2
-		rval = [lambda1,lambda2,lambda3,x,y,z]
-		rval[3+c] = lambda1*trimatrix[2,0]+lambda2*trimatrix[2,1]+lambda3*trimatrix[2,2]
-
-		# feel free to put better guesses if you have them
-		# but it's linear so I think it should be okay?
-		solved = (rval[3+c] - P[2,0]).collapse_on('z')
-		real_z = -solved.sterm / solved.mterm
-		if solved(z=real_z) < epsilon:
-			rval[0] = rval[0](z=real_z)
-			rval[1] = rval[1](z=real_z)
-			rval[2] = rval[2](z=real_z)
-			rval[3+c] = rval[3+c](z=real_z)
-		else:
-			print "Found no solution to equation %s=0" % (str(rval[3+c] - P[2,0]))
-			return [0., 0., 0., x, y, z]
-
-		return rval
-
-	def geom_cart2bary(self,tri,x,y,z):
+	def geom_cart2bary(self,tri,x,y,z,minax):
 		P = array([x,y,z])
-		if x == None:
+		if minax == 0:
 			a = 1
 			b = 2
-			c = 0
-		elif y == None:
+		elif minax == 1:
 			a = 0
 			b = 2
-			c = 1
 		else:
 			a = 0
 			b = 1
-			c = 2
+		c = minax
 
 		det = (tri[1,b]-tri[2,b])*(tri[0,a]-tri[2,a]) + \
 		      (tri[2,a]-tri[1,a])*(tri[0,b]-tri[2,b])
@@ -300,20 +269,6 @@ class Tri2Voxel:
 
 		return rval
 
-	def geom_bary(self,tri,x,y,z):
-
-
-		# Get the barycentric coordinates of the center of this quad
-		[l1, l2, l3, x, y, z] = self.geom_cart2bary(tri, x, y, z)
-		if l1 == 0. and l2 == 0. and l3 == 0.:
-			return [x, y, z, False]
-
-		inside = l1>=0 and l1<=1 and l2>=0 and l2<=1 and l3>=0 and l3<=1
-
-		# give back the results
-		return [x, y, z, inside]
-
-
 	def geom_mat(self,tri,x,y,z,timg,ttex,majax,smjax,minax):
 
 		if ttex == None or timg == None:
@@ -323,28 +278,28 @@ class Tri2Voxel:
 		p1 = [x, y, z]
 		p1[majax] -= 0.5
 		p1[smjax] -= 0.5
-		p1 = self.geom_cart2bary(tri, p1[0], p1[1], p1[2])
+		p1 = self.geom_cart2bary(tri, p1[0], p1[1], p1[2],minax)
 		if p1[0] == 0 and p1[2] == 0 and p1[2] == 0:
 			return [1, 0]
 
 		p2 = [x, y, z]
 		p2[majax] += 0.5
 		p2[smjax] -= 0.5
-		p2 = self.geom_cart2bary(tri, p2[0], p2[1], p2[2])
+		p2 = self.geom_cart2bary(tri, p2[0], p2[1], p2[2],minax)
 		if p2[0] == 0 and p2[2] == 0 and p2[2] == 0:
 			return [1, 0]
 
 		p3 = [x, y, z]
 		p3[majax] -= 0.5
 		p3[smjax] += 0.5
-		p3 = self.geom_cart2bary(tri, p3[0], p3[1], p3[2])
+		p3 = self.geom_cart2bary(tri, p3[0], p3[1], p3[2],minax)
 		if p3[0] == 0 and p3[2] == 0 and p3[2] == 0:
 			return [1, 0]
 
 		p4 = [x, y, z]
 		p4[majax] += 0.5
 		p4[smjax] += 0.5
-		p4 = self.geom_cart2bary(tri, p4[0], p4[1], p4[2])
+		p4 = self.geom_cart2bary(tri, p4[0], p4[1], p4[2],minax)
 		if p4[0] == 0 and p4[2] == 0 and p4[2] == 0:
 			return [1, 0]
 
@@ -364,28 +319,31 @@ class Tri2Voxel:
 		d = d if d < 7 else 7
 
 		pxcount = 0
-		pxsum = [0, 0, 0]
+		pxsum = [0.]*len(timg.uintarray[0,0])
 
 		for a in np.linspace(0,1,d):
 			for b in np.linspace(0,1,c):
 				cx = a*p3[0]+(1-a)*p1[0]+a*(p4[0]-p3[0])*b+(1-a)*(p2[0]-p1[0])*b
 				cy = a*p3[1]+(1-a)*p1[1]+a*(p4[1]-p3[1])*b+(1-a)*(p2[1]-p1[1])*b
 				# Step 3: Grab the pixel there
-				pxc = array([cx % timg.uintarray.shape[1], \
-		             (timg.uintarray.shape[0] - cy) % timg.uintarray.shape[0]])
+				pxc = array([self.modulus(cx,timg.uintarray.shape[1]), \
+		             self.modulus((timg.uintarray.shape[0] - cy),timg.uintarray.shape[0])])
+				if np.isnan(pxc[0]) or np.isnan(pxc[1]):
+					continue
 				if pxc[1] >= timg.uintarray.shape[0] or pxc[0] >= timg.uintarray.shape[1]:
 					continue
 				pixel = timg.uintarray[pxc[1],pxc[0]]
 				pxcount += 1
-				pxsum = [pxsum[0]+pixel[0], pxsum[1]+pixel[1], pxsum[2]+pixel[2]]
+				pxsum = pxsum + pixel
 
 		data, damage = [1, 0]
 		if pxcount > 0:
 			self.pxscan += pxcount
-			pixel = [float(pxsum[0])/float(pxcount), \
-					 float(pxsum[1])/float(pxcount), \
-					 float(pxsum[2])/float(pxcount)]
-			data, damage = mcBlockData.nearest(int(pixel[0]),int(pixel[1]),int(pixel[2]))
+			pixel = pxsum/float(pxcount)
+			if len(pixel) >= 4 and pixel[3] < 127:
+				data, damage = [0, 0]
+			else:
+				data, damage = mcBlockData.nearest(int(pixel[0]),int(pixel[1]),int(pixel[2]))
 		return [data, damage]
 
 def main():
@@ -394,12 +352,12 @@ def main():
 		return
 
 	filename = sys.argv[1]
-	mesh = collada.Collada(filename, ignore=[collada.DaeUnsupportedError,
+	model = collada.Collada(filename, ignore=[collada.DaeUnsupportedError,
 	               collada.DaeBrokenRefError])
 
 	maxs = array([-1e99,-1e99,-1e99])
 	mins = array([ 1e99, 1e99, 1e99])
-	for geom in mesh.geometries:
+	for geom in model.geometries:
 		for triset in geom.primitives:
 			maxs = array([max(maxs[0],np.max(triset.vertex[:,0])), \
 			              max(maxs[1],np.max(triset.vertex[:,1])), \
@@ -407,23 +365,26 @@ def main():
 			mins = array([min(mins[0],np.min(triset.vertex[:,0])), \
 			              min(mins[1],np.min(triset.vertex[:,1])), \
 			              min(mins[2],np.min(triset.vertex[:,2]))])
+	print("Grabbed extent information from %d geometries" % len(model.geometries))
 
 	# Get some sort of scaling information
 	scale = [.01,.01,.01]
-	if mesh.assetInfo != None and mesh.assetInfo.unitmeter != None:
-		print("This model contains units, %f %s per meter" % (mesh.assetInfo.unitmeter, mesh.assetInfo.unitname))
-		scale = mesh.assetInfo.unitmeter
+	if model.assetInfo != None and model.assetInfo.unitmeter != None:
+		print("This model contains units, %f %s per meter" % (model.assetInfo.unitmeter, model.assetInfo.unitname))
+		scale = model.assetInfo.unitmeter
 		scale = [scale, scale, scale]
 
-	t2v = Tri2Voxel(mesh)
+	t2v = Tri2Voxel(model)
 	t2v.scale = array(scale)
 	t2v.geom_prep(mins,maxs)
 
-	for geom in mesh.geometries:
+	for geom in model.geometries:
 		for triset in geom.primitives:
 			trilist = list(triset)
 			for tri in trilist:
 				t2v.geom_tri2voxel(tri)
+		print("Voxelized triangles from geometry '%s'" % geom.name)
+	print("Voxelized triangles from %d geometries" % len(model.geometries))
 
 	# Print some stats
 	ar1  = np.count_nonzero(t2v.arr3d_id)
