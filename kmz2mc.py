@@ -7,6 +7,7 @@ import numpy as np
 from numpy import array
 import math
 import mcBlockData
+import time					# For progress timing
 
 epsilon = 1e-5
 
@@ -112,16 +113,16 @@ class Tri2Voxel:
 					# and moves from src to src+dir
 					cart_coords = self.geom_makecart(tv,bary_coords)
 					voxels = self.castraythroughvoxels(cart_coords,snorm) 
-					for voxel in voxels:
-						old = np.copy(voxel)
+
+					for voxel in [voxels]:
+						a, b, c = self.geom_vc2cs(voxel)
+						if self.arr3d_id[a, b, c] != 0 or a < 0 or b < 0 or c < 0:
+							# Avoid replacing voxels. Todo: majority vector rules
+							# Also avoid wrapping up to the ceiling
+							continue;
 						voxel[omitaxis] = None
 						x, y, z = voxel
 						mat, dat = self.geom_mat(tv,x,y,z,ti,txc,majax,smjax,minax)
-
-						x, y, z = old
-						a = self.geom_vc2c(x,0)
-						b = self.geom_vc2c(y,1)
-						c = self.geom_vc2c(z,2)
 
 						try:
 							self.arr3d_id[a,b,c] = mat
@@ -138,7 +139,6 @@ class Tri2Voxel:
 				return omit
 			
 	def castraythroughvoxels(self,origin,direction,radius=1):
-		rvals = []
 
 		# Cube containing origin point.
 		x = origin[0] #np.floor(origin[0]);
@@ -171,26 +171,35 @@ class Tri2Voxel:
 		# compare with 't'.
 		radius /= math.sqrt(dx*dx+dy*dy+dz*dz);
 
+		# Total T and return value
+		tSigma = 0
+		tDelta = 0
+		rval = [0., None]
+
 		while 1:
 
 			# Invoke the callback, unless we are not *yet* within the bounds of the world
-			if not(x < 0 or y < 0 or z < 0):
-				#print("Block at %f %f %f" % (np.floor(x), np.floor(y), np.floor(z)))
-				rvals.append(array([x,y,z]))
+			if tDelta > rval[0]:
+#				print("Block at %s vec pct %f" % (str(prevpos),tDelta))
+				rval = [tDelta, array(prevpos)]
+
+			prevpos = [x,y,z]
+			tSigma += tDelta
 
 			# tMaxX stores the t-value at which we cross a cube boundary along the
 			# X axis, and similarly for Y and Z. Therefore, choosing the least tMax
-			# chooses the closest cube boundary. Only the first case of the four
-			# has been commented in detail.
+			# chooses the closest cube boundary. Only the first case of the -f-o-u-r-
+			# three cases has been commented in detail.
 			if tMaxX < tMaxY:
 				if tMaxX < tMaxZ:
-					if tMaxX > radius:
-						break
 					# Update which cube we are now in.
 					x += stepX
 					# Adjust tMaxX to the next X-oriented boundary crossing.
 					tMaxX += tDeltaX
-					# Record the normal vector of the cube face we entered.
+					# Record the deltaT for the cube we just left
+					tDelta = tDeltaX
+					if tMaxX > radius:
+						break
 					continue
 			else:
 				if tMaxY < tMaxZ:
@@ -198,14 +207,22 @@ class Tri2Voxel:
 						break
 					y += stepY
 					tMaxY += tDeltaY
+					tDelta = tDeltaY
 					continue
 
 			if tMaxZ > radius:
 				break;
 			z += stepZ
 			tMaxZ += tDeltaZ
+			tDelta = tDeltaZ
 
-		return rvals
+		tDelta = 1. - tSigma
+		
+		if tDelta > rval[0]:
+#			print("Block at %s vec pct %f" % (str(prevpos),tDelta))
+			rval = [tDelta, array(prevpos)]
+
+		return rval[1]
 
 	def intbound(self, s, ds):
 		if ds < 0:
@@ -225,14 +242,11 @@ class Tri2Voxel:
 	def geom_makecart(self,tri,bary):
 		return tri[0]*bary[0]+tri[1]*bary[1]+tri[2]*bary[2]
 
-	def geom_c2vcd(self,coord,axis):
-		return round(coord + self.voffset[axis]) - 0.5
-
-	def geom_c2vcu(self,coord,axis):
-		return round(coord + self.voffset[axis]) + 0.5
+	def geom_vc2cs(self,coords):
+		return np.round(coords - self.voffset)
 
 	def geom_vc2c(self,coord,axis):
-		return np.round(coord - self.voffset[axis] - 0.5)
+		return np.round(coord - self.voffset[axis])
 
 	def geom_eucdist(self,p1,p2):
 		s = (p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2
@@ -343,99 +357,113 @@ class Tri2Voxel:
 			self.pxscan += pxcount
 			pixel = pxsum/float(pxcount)
 			if len(pixel) >= 4 and pixel[3] < 127:
-				data, damage = [0, 0]
+				if pixel[3] < 1:
+					data, damage = [0, 0]		# air
+				else:
+					data, damage = [20, 0]		# glass
 			else:
 				data, damage = mcBlockData.nearest(int(pixel[0]),int(pixel[1]),int(pixel[2]))
 		return [data, damage]
 
-def recurse_model(model,mode,ind):
-	for node in model.scenes[0].nodes:
-		ind = recurse_dive(node,mode,None,ind)
-	return ind
+class ModelRecurse:
+	def __init__(self):
+		self.abort = False
 
-def recurse_dive(node,mode,xform,ind):
-	xform2 = None
+	def recurse_model(self,model,mode,ind):
+		for node in model.scenes[0].nodes:
+			ind = self.recurse_dive(node,mode,None,ind)
+			if self.abort:
+				break;
 
-	# Deal with fetching and possibly combining transforms
-	if node.transforms:
-		xform2 = node.transforms[0].matrix
-		if None != xform:
-			xform = np.dot(xform,xform2)
-		else:
-			xform = xform2
+		self.abort = False
+		return ind
 
-	# Deal with the geometry, if it has any
-	for child in node.children:
-		if isinstance(child,collada.scene.NodeNode):
-			ind = recurse_dive(child.node,mode,xform,ind)
-		elif isinstance(child,collada.scene.Node):
-			ind = recurse_dive(child,mode,xform,ind)
-		elif isinstance(child,collada.scene.GeometryNode):
-			ind = recurse_geometry(child.geometry,mode,xform,ind)
-		else:
-			print xform
-			print("Found an unknown %s" % (type(child)))
-	return ind
+	def recurse_dive(self,node,mode,xform,ind):
+		xform2 = None
 
-def recurse_geometry(node,mode,xform,ind):
-	if mode == 'extents':
-		mins, maxs = ind
-		for triset in node.primitives:
-			if not(isinstance(triset,collada.triangleset.TriangleSet)):
-				print("Warning: ignoring primitive of type %s" % type(triset))
-				continue
-
-			# Apply the transform, if there is one
-			v = np.copy(triset.vertex)
+		# Deal with fetching and possibly combining transforms
+		if node.transforms:
+			xform2 = node.transforms[0].matrix
 			if None != xform:
-				v.resize((v.shape[0],1+v.shape[1]))
-				v[:,3] = 1.
-				v = v.transpose()
-				v = np.dot(xform,v)
-				v = v.transpose()
-			
-			maxs = array([max(maxs[0],np.max(v[:,0])), \
-			              max(maxs[1],np.max(v[:,1])), \
-			              max(maxs[2],np.max(v[:,2]))])
-			mins = array([min(mins[0],np.min(v[:,0])), \
-			              min(mins[1],np.min(v[:,1])), \
-			              min(mins[2],np.min(v[:,2]))])
+				xform = np.dot(xform,xform2)
+			else:
+				xform = xform2
 
-		print("Scanned geometry '%s' for extents" % node.name)
-		return [mins, maxs]
+		# Deal with the geometry, if it has any
+		for child in node.children:
+			if isinstance(child,collada.scene.NodeNode):
+				ind = self.recurse_dive(child.node,mode,xform,ind)
+			elif isinstance(child,collada.scene.Node):
+				ind = self.recurse_dive(child,mode,xform,ind)
+			elif isinstance(child,collada.scene.GeometryNode):
+				ind = self.recurse_geometry(child.geometry,mode,xform,ind)
+			else:
+				print xform
+				print("Found an unknown %s" % (type(child)))
 
-	elif mode == 'convert':
-		for triset in node.primitives:
-			if not(isinstance(triset,collada.triangleset.TriangleSet)):
-				print("Warning: ignoring primitive of type %s" % type(triset))
-				continue
+			if self.abort:
+				break;
+		return ind
 
-			trilist = list(triset)
-			for tri in trilist:
+	def recurse_geometry(self,node,mode,xform,ind):
+		if mode == 'extents':
+			mins, maxs = ind
+			for triset in node.primitives:
+				if not(isinstance(triset,collada.triangleset.TriangleSet)):
+					print("Warning: ignoring primitive of type %s" % type(triset))
+					continue
+
 				# Apply the transform, if there is one
-				otv = tri.vertices
 				if None != xform:
-					tv = np.copy(tri.vertices)
-					oshape = tv.shape
-					#print("Resizing to %s" % str((tv.shape[0],1+tv.shape[1])))
-					tv = np.resize(tv,(tv.shape[0],1+tv.shape[1]))
-					tv[:,3] = 1.
-					tv = tv.transpose()
-					tv = np.dot(xform,tv)
-					#print tv
-					tv = tv[:3,:]
-					tv = tv.transpose()
-					#print tv
-					tri.vertices = tv
-			
-				ind.geom_tri2voxel(tri)
-				tri.vertices = otv
+					oshape = triset.vertex.shape
+					v = np.ones((oshape[0],1+oshape[1]))
+					v[:,:3] = triset.vertex
+					v = v.transpose()
+					v = np.dot(xform,v)
+					v = v.transpose()
 
-		print("Converted geometry '%s'" % node.name)
-	else:
-		print("Warning: skipping geometry for unknown mode '%s'" % mode)
-	return ind
-	
+				else:
+					v = triset.vertex
+				
+				maxs = array([max(maxs[0],np.max(v[:,0])), \
+							  max(maxs[1],np.max(v[:,1])), \
+							  max(maxs[2],np.max(v[:,2]))])
+				mins = array([min(mins[0],np.min(v[:,0])), \
+							  min(mins[1],np.min(v[:,1])), \
+							  min(mins[2],np.min(v[:,2]))])
+
+			print("Scanned geometry '%s' for extents" % node.name)
+			return [mins, maxs]
+
+		elif mode == 'convert':
+			starttime = time.time()
+			startvox = ind.voxchg
+			for triset in node.primitives:
+				if not(isinstance(triset,collada.triangleset.TriangleSet)):
+					print("Warning: ignoring primitive of type %s" % type(triset))
+					continue
+
+				trilist = list(triset)
+				for tri in trilist:
+					# Apply the transform, if there is one
+					otv = tri.vertices
+					if None != xform:
+						tv = np.ones((otv.shape[0], 1 + otv.shape[1]))
+						tv[:,:3] = otv
+						tv = tv.transpose()
+						tv = np.dot(xform,tv)
+						tv = tv[:3,:]
+						tv = tv.transpose()
+						tri.vertices = tv
+				
+					ind.geom_tri2voxel(tri)
+					tri.vertices = otv
+
+			print("Converted geometry '%s' in %d s, changed %d voxels" % (node.name,time.time()-starttime,ind.voxchg-startvox))
+		else:
+			print("Warning: skipping geometry for unknown mode '%s'" % mode)
+		return ind
+		
 
 def main():
 	if len(sys.argv) < 2:
@@ -449,7 +477,8 @@ def main():
 	maxs = array([-1e99,-1e99,-1e99])
 	mins = array([ 1e99, 1e99, 1e99])
 
-	mins, maxs = recurse_model(model,"extents",[mins,maxs])
+	mr = ModelRecurse()
+	mins, maxs = mr.recurse_model(model,"extents",[mins,maxs])
 	print("Computed model extents")
 
 # some sort of scaling information
@@ -463,7 +492,7 @@ def main():
 	t2v.scale = array(scale)
 	t2v.geom_prep(mins,maxs)
 
-	recurse_model(model,"convert",t2v)
+	mr.recurse_model(model,"convert",t2v)
 
 	# Print some stats
 	ar1  = np.count_nonzero(t2v.arr3d_id)
@@ -473,7 +502,7 @@ def main():
 	
 	# Paste into MC level
 	
-	level = mclevel.fromFile("/home/christopher/.minecraft/saves/Cemetech/level.dat")
+	level = mclevel.fromFile("/home/christopher/.minecraft/saves/NYC/level.dat")
 	t2v.arr3d_id = np.fliplr(t2v.arr3d_id)
 	t2v.arr3d_dt = np.fliplr(t2v.arr3d_dt)
 	for x in xrange(0,int(np.ceil(t2v.arrdim[0]/16.))):
@@ -483,9 +512,9 @@ def main():
 			xmax = min(16,t2v.arrdim[0]-16*x)
 			zmax = min(16,t2v.arrdim[1]-16*z)
 
-			chunk.Blocks[0:xmax,0:zmax,34:(34+t2v.arrdim[2])] = \
+			chunk.Blocks[0:xmax,0:zmax,64:(64+t2v.arrdim[2])] = \
 			      t2v.arr3d_id[(16*x):(16*x+xmax),(16*z):(16*z+zmax),:]
-			chunk.Data[0:xmax,0:zmax,34:(34+t2v.arrdim[2])] = \
+			chunk.Data[0:xmax,0:zmax,64:(64+t2v.arrdim[2])] = \
 			      t2v.arr3d_dt[(16*x):(16*x+xmax),(16*z):(16*z+zmax),:]
 
 			chunk.chunkChanged()
