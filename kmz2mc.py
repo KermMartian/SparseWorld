@@ -7,6 +7,7 @@ import numpy as np
 from numpy import array
 import math
 import mcBlockData
+import nbt
 import time					# For progress timing
 
 epsilon = 1e-5
@@ -505,6 +506,21 @@ def main():
 	level = mclevel.fromFile("/home/christopher/.minecraft/saves/NYC/level.dat")
 	t2v.arr3d_id = np.fliplr(t2v.arr3d_id)
 	t2v.arr3d_dt = np.fliplr(t2v.arr3d_dt)
+
+	# Compute new world height
+	worldheight = int(64+t2v.arrdim[2])
+	worldheight |= worldheight >> 1
+	worldheight |= worldheight >> 2
+	worldheight |= worldheight >> 4
+	worldheight |= worldheight >> 8
+	worldheight |= worldheight >> 16
+	worldheight += 1
+
+	if worldheight > level.Height:
+		print("World height increased from %d to %d" % (level.Height,worldheight))
+		level.Height = worldheight
+		level.root_tag["Data"]["worldHeight"] = nbt.TAG_Int(worldheight)
+	
 	for x in xrange(0,int(np.ceil(t2v.arrdim[0]/16.))):
 		for z in xrange(0,int(np.ceil(t2v.arrdim[1]/16.))):
 
@@ -512,11 +528,13 @@ def main():
 			xmax = min(16,t2v.arrdim[0]-16*x)
 			zmax = min(16,t2v.arrdim[1]-16*z)
 
+#			if chunk.Blocks.shape[2] < 64+t2v.arrdim[2] or \
+#			   chunk.Data.shape[2] < 64+t2v.arrdim[2]:
+
 			chunk.Blocks[0:xmax,0:zmax,64:(64+t2v.arrdim[2])] = \
 			      t2v.arr3d_id[(16*x):(16*x+xmax),(16*z):(16*z+zmax),:]
 			chunk.Data[0:xmax,0:zmax,64:(64+t2v.arrdim[2])] = \
 			      t2v.arr3d_dt[(16*x):(16*x+xmax),(16*z):(16*z+zmax),:]
-
 			chunk.chunkChanged()
 
 	print("Relighting level...")
