@@ -1,6 +1,6 @@
 #!/usr/bin/python
 import sys
-sys.path.append("../pymclevel/")
+sys.path.append("./TopoMC") #"../pymclevel/")
 import mclevel
 import collada
 import numpy as np
