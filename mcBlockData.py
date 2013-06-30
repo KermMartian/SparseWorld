@@ -1,3 +1,4 @@
+from memoize import memoize
 
 mcBlocks = [[120, 120, 120,   1,  0], \
             [115, 115, 115,   4,  0], \
@@ -31,24 +32,16 @@ mcRurals = [[120, 120, 120,   1,  0], \
             [ 64,  81,  96,   2,  0], \
             [ 70, 106, 100,   2,  0], \
 			[105, 160,  91,   2,  0], \
-            [115, 115, 115,   4,  0], \
-            [0x0D,0x2C,0x7B, 22,  0], \
+            [121,  85,  58,   3,  0], \
             [0xDE,0xD6,0xA1, 24,  0], \
-			[ 65, 174,  56,  35,  5], \
-			[ 56,  77,  24,  35, 13], \
-            [0xFF,0xFF,0xFF, 42,  0], \
-			[170,  86,  62,  45,  0], \
-			[115, 169, 115,  48,  0], \
-			[0x11,0x11,0x1A, 49,  0], \
-			[155, 166, 176,  82,  0], \
-			[127, 127, 127,  98,  0], \
-            [0xFF,0x00,0x00,152,  0]]
+			[155, 166, 176,  82,  0]]
 
-def nearest(r, g, b, rural=False):
+@memoize()
+def nearest(r, g, b, ir=0, natural=False):
 	dataval = 0
 	damageval = 0
 	diff = 1e99
-	for block in (mcRurals if rural else mcBlocks):
+	for block in (mcRurals if (natural and ir > 100) else mcBlocks):
 		ndiff = (r-block[0])**2 + (g-block[1])**2 + (b-block[2])**2
 		if ndiff < diff:
 			diff = ndiff

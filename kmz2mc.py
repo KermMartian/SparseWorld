@@ -1,14 +1,19 @@
 #!/usr/bin/python
 import sys
+sys.path.append("./TopoMC/pymclevel") #"../pymclevel/")
 sys.path.append("./TopoMC") #"../pymclevel/")
 import mclevel
 import collada
 import numpy as np
 from numpy import array
+from xml.dom import minidom
+import zipfile
+import yaml
 import math
 import mcBlockData
 import nbt
 import time					# For progress timing
+import argparse
 
 epsilon = 1e-5
 
@@ -467,22 +472,35 @@ class ModelRecurse:
 		
 
 def main():
-	if len(sys.argv) < 2:
-		print("Usage: %s <KMZ_file>" % sys.argv[0])
-		return
 
-	filename = sys.argv[1]
+    # parse options and get results
+	parser = argparse.ArgumentParser(description='Converts a single building from a Collada file and pastes into a Minecraft world')
+	parser.add_argument('--model', required=True, type=str, help='relative or absolute path to .kmz file containing Collada model and assets')
+	parser.add_argument('--debug', action='store_true', help='enable debug output')
+	parser.add_argument('--world', required=True, type=str, help='path to main folder of a target Minecraft world')
+	args = parser.parse_args()
+
+	filename = args.model
+
+	# Determine where to paste into target world
+	zipf = zipfile.ZipFile(args.model, 'r')
+	kmldata = minidom.parse(zipf.open('doc.kml'))
+	zipf = None
+	location = kmldata.getElementsByTagName('Location')[0]
+	latitude  = float(location.getElementsByTagName('latitude')[0].childNodes[0].data))
+	longitude = float(location.getElementsByTagName('longitude')[0].childNodes[0].data))
+	kmldata = None
+	
+	# Open the model and determine its extents
 	model = collada.Collada(filename, ignore=[collada.DaeUnsupportedError,
 	               collada.DaeBrokenRefError])
-
 	maxs = array([-1e99,-1e99,-1e99])
 	mins = array([ 1e99, 1e99, 1e99])
-
 	mr = ModelRecurse()
 	mins, maxs = mr.recurse_model(model,"extents",[mins,maxs])
 	print("Computed model extents")
 
-# some sort of scaling information
+	# some sort of scaling information
 	scale = [.01,.01,.01]
 	if model.assetInfo != None and model.assetInfo.unitmeter != None:
 		print("This model contains units, %f %s per meter" % (model.assetInfo.unitmeter, model.assetInfo.unitname))
