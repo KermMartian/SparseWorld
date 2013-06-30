@@ -1,4 +1,5 @@
 #!/usr/bin/python
+import os
 import sys
 sys.path.append("./TopoMC/pymclevel") #"../pymclevel/")
 sys.path.append("./TopoMC") #"../pymclevel/")
@@ -487,10 +488,29 @@ def main():
 	kmldata = minidom.parse(zipf.open('doc.kml'))
 	zipf = None
 	location = kmldata.getElementsByTagName('Location')[0]
-	latitude  = float(location.getElementsByTagName('latitude')[0].childNodes[0].data))
-	longitude = float(location.getElementsByTagName('longitude')[0].childNodes[0].data))
+	latitude  = float(location.getElementsByTagName('latitude')[0].childNodes[0].data)
+	longitude = float(location.getElementsByTagName('longitude')[0].childNodes[0].data)
+	altmode   = str(kmldata.getElementsByTagName('altitudeMode')[0].childNodes[0].data)
+	altitude  = float(location.getElementsByTagName('altitude')[0].childNodes[0].data)
 	kmldata = None
 	
+	# Get information about the target world
+	yamlfile = open(os.path.join(args.world, 'Region.yaml'), 'r')
+	yamlfile.readline()				# discard first line
+	myRegion = yaml.safe_load(yamlfile)
+	yamlfile.close()
+
+	# Compute the world (x,y) for this model
+	metersPerLat =  (myRegion['tiles']['ymax'] - myRegion['tiles']['ymin']) * myRegion['tilesize']
+	metersPerLat /= (myRegion['llextents']['ymax'] - myRegion['llextents']['ymin'])
+	metersPerLon =  (myRegion['tiles']['xmax'] - myRegion['tiles']['xmin']) * myRegion['tilesize']
+	metersPerLon /= (myRegion['llextents']['xmax'] - myRegion['llextents']['xmin'])
+	modelBaseLoc = [ myRegion['tiles']['xmin'] * myRegion['tilesize'] + \
+	                 ((longitude - myRegion['llextents']['xmin']) * metersPerLon), \
+	                 myRegion['tiles']['ymin'] * myRegion['tilesize'] + \
+	                 ((latitude  - myRegion['llextents']['ymin']) * metersPerLat), 0 ]
+	print("Loc: %f,%f => %d,%d within %s" % (latitude, longitude, modelBaseLoc[0], modelBaseLoc[1], str(myRegion['llextents'])))
+
 	# Open the model and determine its extents
 	model = collada.Collada(filename, ignore=[collada.DaeUnsupportedError,
 	               collada.DaeBrokenRefError])
@@ -498,7 +518,8 @@ def main():
 	mins = array([ 1e99, 1e99, 1e99])
 	mr = ModelRecurse()
 	mins, maxs = mr.recurse_model(model,"extents",[mins,maxs])
-	print("Computed model extents")
+	print("Computed model extents: [%f, %f, %f,] to [%f, %f, %f]" % (mins[0], mins[1], mins[2], 
+                                                                     maxs[0], maxs[1], maxs[2]))
 
 	# some sort of scaling information
 	scale = [.01,.01,.01]
@@ -511,7 +532,16 @@ def main():
 	t2v.scale = array(scale)
 	t2v.geom_prep(mins,maxs)
 
-	mr.recurse_model(model,"convert",t2v)
+	# Use extents and modelBaseLoc to compute the world coordinate that
+	# corresponds to the output array's [0,0,0]
+	cornerBase = t2v.tvoffset[0] * t2v.tvscale[0]
+	modelBaseLoc -= cornerBase
+	modelBaseLoc = [round(x) for x in modelBaseLoc]
+
+	# Convert and fix orientation
+	mr.recurse_model(model,"convert",t2v)		# Do the conversion!
+	t2v.arr3d_id = np.fliplr(t2v.arr3d_id)		# Fix block ID array
+	t2v.arr3d_dt = np.fliplr(t2v.arr3d_dt)		# Fix damage val array
 
 	# Print some stats
 	ar1  = np.count_nonzero(t2v.arr3d_id)
@@ -519,14 +549,28 @@ def main():
 	print("%d/%d voxels filled (%.2f%% fill level)" % (ar1,ar01,100*ar1/ar01))
 	print("t2v reports %d voxels changed" % t2v.voxchg)
 	
-	# Paste into MC level
-	
-	level = mclevel.fromFile("/home/christopher/.minecraft/saves/NYC/level.dat")
-	t2v.arr3d_id = np.fliplr(t2v.arr3d_id)
-	t2v.arr3d_dt = np.fliplr(t2v.arr3d_dt)
+	# Open MC level for pasting 
+	level = mclevel.fromFile(os.path.join(args.world,"level.dat"))
 
+	# Compute world-scaled altitude information
+	if altmode == "absolute":
+		sealevel = myRegion['sealevel'] if 'sealevel' in myRegion else 64
+		modelAltBase = int(altitude * myRegion['vscale'] + sealevel)
+	elif altmode == "relativeToGround":
+		xbase = int(round(modelBaseLoc[0] + cornerBase[0]))
+		zbase = int(round(modelBaseLoc[1] + cornerBase[1]))
+		chunk = level.getChunk(int(xbase/16.), int(zbase/16.))
+		voxcol = chunk.Blocks[xbase % 16, zbase % 16, :]
+		voxtop = [i for i, e in enumerate(voxcol) if e != 0][-1] + 1
+		modelAltBase = int(voxtop + modelBaseLoc[2])
+		chunk = None
+	else:
+		print("Error: Unknown altitude mode in KML file.")
+		raise IOError
+	print("Model base altitude is %d meters (voxels)" % modelAltBase)
+	
 	# Compute new world height
-	worldheight = int(64+t2v.arrdim[2])
+	worldheight = int(modelAltBase+t2v.arrdim[2])
 	worldheight |= worldheight >> 1
 	worldheight |= worldheight >> 2
 	worldheight |= worldheight >> 4
@@ -535,24 +579,36 @@ def main():
 	worldheight += 1
 
 	if worldheight > level.Height:
-		print("World height increased from %d to %d" % (level.Height,worldheight))
+		print("World height increased from %d to %d" % \
+		      (level.Height,worldheight))
 		level.Height = worldheight
 		level.root_tag["Data"]["worldHeight"] = nbt.TAG_Int(worldheight)
 	
-	for x in xrange(0,int(np.ceil(t2v.arrdim[0]/16.))):
-		for z in xrange(0,int(np.ceil(t2v.arrdim[1]/16.))):
+	chunksx = [int(np.floor(modelBaseLoc[0]/16.)), \
+	           int(np.floor((modelBaseLoc[0]+t2v.arrdim[0])/16.))]
+	chunksz = [int(np.floor(modelBaseLoc[1]/16.)), \
+	           int(np.floor((modelBaseLoc[1]+t2v.arrdim[1])/16.))]
+	for x in xrange(chunksx[0], 1+chunksx[1]):
+		for z in xrange(chunksz[0], 1+chunksz[1]):
 
 			chunk = level.getChunk(x,z)
-			xmax = min(16,t2v.arrdim[0]-16*x)
-			zmax = min(16,t2v.arrdim[1]-16*z)
+			xmin = max(0,modelBaseLoc[0]-16*x)
+			xmax = min(16,t2v.arrdim[0]+16*(chunksx[0]-x))
+			zmin = max(0,modelBaseLoc[1]-16*z)
+			zmax = min(16,t2v.arrdim[1]+16*(chunksz[0]-z))
 
-#			if chunk.Blocks.shape[2] < 64+t2v.arrdim[2] or \
-#			   chunk.Data.shape[2] < 64+t2v.arrdim[2]:
+			if xmax <= 0 or zmax <= 0:
+				continue;
 
-			chunk.Blocks[0:xmax,0:zmax,64:(64+t2v.arrdim[2])] = \
-			      t2v.arr3d_id[(16*x):(16*x+xmax),(16*z):(16*z+zmax),:]
-			chunk.Data[0:xmax,0:zmax,64:(64+t2v.arrdim[2])] = \
-			      t2v.arr3d_dt[(16*x):(16*x+xmax),(16*z):(16*z+zmax),:]
+			#print("Copying %d,%d,%d to %d,%d,%d" % (xmin,modelAltBase,zmin,xmax,(modelAltBase+t2v.arrdim[2]),zmax))
+			chunk.Blocks[xmin:xmax,zmin:zmax,
+			             modelAltBase:(modelAltBase+t2v.arrdim[2])] = \
+			      t2v.arr3d_id[(16*(x-chunksx[0])):(16*(x-chunksx[0])+(xmax-xmin)), \
+			      (16*(z-chunksz[0])):(16*(z-chunksz[0])+(zmax-zmin)),:]
+			chunk.Data[xmin:xmax,zmin:zmax,
+			           modelAltBase:(modelAltBase+t2v.arrdim[2])] = \
+			      t2v.arr3d_dt[(16*(x-chunksx[0])):(16*(x-chunksx[0])+(xmax-xmin)), \
+			      (16*(z-chunksz[0])):(16*(z-chunksz[0])+(zmax-zmin)),:]
 			chunk.chunkChanged()
 
 	print("Relighting level...")
