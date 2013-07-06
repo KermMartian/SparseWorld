@@ -501,15 +501,16 @@ def main():
 	yamlfile.close()
 
 	# Compute the world (x,y) for this model
+	llextents = myRegion['wgs84extents']['elevation']
 	metersPerLat =  (myRegion['tiles']['ymax'] - myRegion['tiles']['ymin']) * myRegion['tilesize']
-	metersPerLat /= (myRegion['llextents']['ymax'] - myRegion['llextents']['ymin'])
+	metersPerLat /= (llextents['ymax'] - llextents['ymin'])
 	metersPerLon =  (myRegion['tiles']['xmax'] - myRegion['tiles']['xmin']) * myRegion['tilesize']
-	metersPerLon /= (myRegion['llextents']['xmax'] - myRegion['llextents']['xmin'])
+	metersPerLon /= (llextents['xmax'] - llextents['xmin'])
 	modelBaseLoc = [ myRegion['tiles']['xmin'] * myRegion['tilesize'] + \
-	                 ((longitude - myRegion['llextents']['xmin']) * metersPerLon), \
-	                 myRegion['tiles']['ymin'] * myRegion['tilesize'] + \
-	                 ((latitude  - myRegion['llextents']['ymin']) * metersPerLat), 0 ]
-	print("Loc: %f,%f => %d,%d within %s" % (latitude, longitude, modelBaseLoc[0], modelBaseLoc[1], str(myRegion['llextents'])))
+	                 ((longitude - llextents['xmin']) * metersPerLon), \
+	                 myRegion['tiles']['ymax'] * myRegion['tilesize'] - \
+	                 ((latitude  - llextents['ymin']) * metersPerLat), 0 ]	#Because Minecraft maps are flipped upside-down
+	print("Loc: %f,%f => %d,%d within %s" % (latitude, longitude, modelBaseLoc[0], modelBaseLoc[1], str(llextents)))
 
 	# Open the model and determine its extents
 	model = collada.Collada(filename, ignore=[collada.DaeUnsupportedError,
@@ -601,14 +602,26 @@ def main():
 				continue;
 
 			#print("Copying %d,%d,%d to %d,%d,%d" % (xmin,modelAltBase,zmin,xmax,(modelAltBase+t2v.arrdim[2]),zmax))
-			chunk.Blocks[xmin:xmax,zmin:zmax,
-			             modelAltBase:(modelAltBase+t2v.arrdim[2])] = \
-			      t2v.arr3d_id[(16*(x-chunksx[0])):(16*(x-chunksx[0])+(xmax-xmin)), \
-			      (16*(z-chunksz[0])):(16*(z-chunksz[0])+(zmax-zmin)),:]
-			chunk.Data[xmin:xmax,zmin:zmax,
+			inp = chunk.Blocks[xmin:xmax,zmin:zmax, \
+			                   modelAltBase:(modelAltBase+t2v.arrdim[2])]
+
+			# Data first because Blocks must retain its 0s
+			ind = chunk.Data[xmin:xmax,zmin:zmax, \
+			                 modelAltBase:(modelAltBase+t2v.arrdim[2])]
+			chunk.Data[xmin:xmax,zmin:zmax, \
 			           modelAltBase:(modelAltBase+t2v.arrdim[2])] = \
-			      t2v.arr3d_dt[(16*(x-chunksx[0])):(16*(x-chunksx[0])+(xmax-xmin)), \
-			      (16*(z-chunksz[0])):(16*(z-chunksz[0])+(zmax-zmin)),:]
+			np.where(inp != 0, ind, \
+			         t2v.arr3d_dt[(16*(x-chunksx[0])):(16*(x-chunksx[0])+(xmax-xmin)), \
+			         (16*(z-chunksz[0])):(16*(z-chunksz[0])+(zmax-zmin)),:])
+
+			# Blocks second.
+			chunk.Blocks[xmin:xmax,zmin:zmax, \
+			             modelAltBase:(modelAltBase+t2v.arrdim[2])] = \
+			np.where(inp != 0, inp, \
+			         t2v.arr3d_id[(16*(x-chunksx[0])):(16*(x-chunksx[0])+(xmax-xmin)), \
+			         (16*(z-chunksz[0])):(16*(z-chunksz[0])+(zmax-zmin)),:])
+
+			# And mark the chunk.
 			chunk.chunkChanged()
 
 	print("Relighting level...")
