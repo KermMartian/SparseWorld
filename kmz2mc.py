@@ -15,12 +15,13 @@ import mcBlockData
 import nbt
 import time					# For progress timing
 import argparse
+from klogger import klogger, klog_levels
 
 epsilon = 1e-5
 
 class Tri2Voxel:
 
-	def __init__(self,model):
+	def __init__(self,model,log):
 		self.offset = array([0,0,0])	# Offset applied to incoming tris
 		self.scale  = array([1,1,1])	# Scaling applied to incoming tris
 		self.voffset= array([0,0,0])	# Offset of the origin voxel's vertex
@@ -29,13 +30,15 @@ class Tri2Voxel:
 		self.model = model
 		self.voxchg = 0
 		self.pxscan = 0
+		self.log = log
 
 	def geom_prep(self,mins,maxs):
 		self.offset = 1-array([mins[0],mins[1],mins[2]])
 		self.arrdim = (np.ceil((maxs[0]-mins[0])*self.scale[0]+2), \
 		               np.ceil((maxs[1]-mins[1])*self.scale[1]+2), \
 		               np.ceil((maxs[2]-mins[2])*self.scale[2]+2))
-		print("Reserving %d x %d x %d array..." % (self.arrdim[0], self.arrdim[1], self.arrdim[2]))
+		self.log.log_debug(1,"Reserving %d x %d x %d array..." % \
+                           (self.arrdim[0], self.arrdim[1], self.arrdim[2]))
 		self.arr3d_id = np.zeros(self.arrdim)
 		self.arr3d_dt = np.zeros(self.arrdim)
 
@@ -61,8 +64,7 @@ class Tri2Voxel:
 			ti = None
 
 		if tv.shape != (3,3):
-			print("Warning: Bad triangle shape:")
-			print(tv.shape)
+			self.log.log_warn("Bad triangle shape: %s" % str(tv.shape))
 			return
 
 		# Step 1: Offset the triangle in 3-space
@@ -85,7 +87,7 @@ class Tri2Voxel:
 		snorm = np.cross(e[1],e[0])
 		slen  = np.linalg.norm(snorm)
 		if slen == 0:
-			print("Discarding triangle with point normal")
+			self.log.log_warn("Discarding triangle with point normal")
 			return
 		snorm = snorm/slen
 
@@ -171,7 +173,7 @@ class Tri2Voxel:
 
 		# Avoids an infinite loop.
 		if dx == 0 and dy == 0 and dz == 0:
-			print("Warning: direction vector cast in zero direction")
+			self.log.log_warn("Warning: direction vector cast in zero direction")
 			return
 
 		# Rescale from units of 1 cube-edge to units of 'direction' so we can
@@ -284,7 +286,7 @@ class Tri2Voxel:
 			l3 = 1. - l1 - l2
 
 		else:				# Incoming divide-by-zero.
-			print("Determinant: Div-by-0 warning %s %s %s" % (str(x),str(y),str(z)))
+			self.log.log_error("Determinant: Div-by-0 warning %s %s %s" % (str(x),str(y),str(z)))
 			return [0., 0., 0., x, y, z]
 
 		rval = [l1, l2, l3, x, y, z]
@@ -373,8 +375,9 @@ class Tri2Voxel:
 		return [data, damage]
 
 class ModelRecurse:
-	def __init__(self):
+	def __init__(self, log):
 		self.abort = False
+		self.log = log
 
 	def recurse_model(self,model,mode,ind):
 		for node in model.scenes[0].nodes:
@@ -405,8 +408,8 @@ class ModelRecurse:
 			elif isinstance(child,collada.scene.GeometryNode):
 				ind = self.recurse_geometry(child.geometry,mode,xform,ind)
 			else:
-				print xform
-				print("Found an unknown %s" % (type(child)))
+				self.log.log_error(str(xform))
+				self.log.log_error("Found an unknown %s" % (type(child)))
 
 			if self.abort:
 				break;
@@ -417,7 +420,7 @@ class ModelRecurse:
 			mins, maxs = ind
 			for triset in node.primitives:
 				if not(isinstance(triset,collada.triangleset.TriangleSet)):
-					print("Warning: ignoring primitive of type %s" % type(triset))
+					self.log.log_warn("Ignoring primitive of type %s" % type(triset))
 					continue
 
 				# Apply the transform, if there is one
@@ -439,7 +442,7 @@ class ModelRecurse:
 							  min(mins[1],np.min(v[:,1])), \
 							  min(mins[2],np.min(v[:,2]))])
 
-			print("Scanned geometry '%s' for extents" % node.name)
+			self.log.log_info("Scanned geometry '%s' for extents" % node.name)
 			return [mins, maxs]
 
 		elif mode == 'convert':
@@ -447,7 +450,7 @@ class ModelRecurse:
 			startvox = ind.voxchg
 			for triset in node.primitives:
 				if not(isinstance(triset,collada.triangleset.TriangleSet)):
-					print("Warning: ignoring primitive of type %s" % type(triset))
+					self.log.log_warn("ignoring primitive of type %s" % type(triset))
 					continue
 
 				trilist = list(triset)
@@ -466,9 +469,10 @@ class ModelRecurse:
 					ind.geom_tri2voxel(tri)
 					tri.vertices = otv
 
-			print("Converted geometry '%s' in %d s, changed %d voxels" % (node.name,time.time()-starttime,ind.voxchg-startvox))
+			self.log.log_info("Converted geometry '%s' in %d s, changed %d voxels" % \
+                          (node.name,time.time()-starttime,ind.voxchg-startvox))
 		else:
-			print("Warning: skipping geometry for unknown mode '%s'" % mode)
+			self.log.log_warn("Skipping geometry for unknown mode '%s'" % mode)
 		return ind
 		
 
@@ -476,10 +480,24 @@ def main():
 
     # parse options and get results
 	parser = argparse.ArgumentParser(description='Converts a single building from a Collada file and pastes into a Minecraft world')
-	parser.add_argument('--model', required=True, type=str, help='relative or absolute path to .kmz file containing Collada model and assets')
-	parser.add_argument('--debug', action='store_true', help='enable debug output')
-	parser.add_argument('--world', required=True, type=str, help='path to main folder of a target Minecraft world')
+	parser.add_argument('--model', required=True, type=str, \
+                        help='relative or absolute path to .kmz file containing Collada model and assets')
+	parser.add_argument('--world', required=True, type=str, \
+                        help='path to main folder of a target Minecraft world')
+	parser.add_argument("-v", "--verbosity", action="count", \
+	                    help="increase output verbosity")
+	parser.add_argument("-q", "--quiet", action="store_true", \
+	                    help="suppress informational output")
 	args = parser.parse_args()
+
+    # set up logging
+	log_level = klog_levels.LOG_INFO
+	if args.quiet:
+		log_level = klog_levels.LOG_ERROR
+	if args.verbosity:
+		# v=1 is DEBUG 1, v=2 is DEBUG 2, and so on
+		log_level += args.verbosity
+	log = klogger(log_level)
 
 	filename = args.model
 
@@ -510,26 +528,27 @@ def main():
 	                 ((longitude - llextents['xmin']) * metersPerLon), \
 	                 myRegion['tiles']['ymax'] * myRegion['tilesize'] - \
 	                 ((latitude  - llextents['ymin']) * metersPerLat), 0 ]	#Because Minecraft maps are flipped upside-down
-	print("Loc: %f,%f => %d,%d within %s" % (latitude, longitude, modelBaseLoc[0], modelBaseLoc[1], str(llextents)))
+	log.log_debug(1,"Loc: %f,%f => %d,%d within %s" % (latitude, longitude, modelBaseLoc[0], modelBaseLoc[1], str(llextents)))
 
 	# Open the model and determine its extents
 	model = collada.Collada(filename, ignore=[collada.DaeUnsupportedError,
 	               collada.DaeBrokenRefError])
 	maxs = array([-1e99,-1e99,-1e99])
 	mins = array([ 1e99, 1e99, 1e99])
-	mr = ModelRecurse()
+	mr = ModelRecurse(log)
 	mins, maxs = mr.recurse_model(model,"extents",[mins,maxs])
-	print("Computed model extents: [%f, %f, %f,] to [%f, %f, %f]" % (mins[0], mins[1], mins[2], 
-                                                                     maxs[0], maxs[1], maxs[2]))
+	log.log_info("Computed model extents: [%f, %f, %f,] to [%f, %f, %f]" % (mins[0], mins[1], mins[2], 
+                                                                            maxs[0], maxs[1], maxs[2]))
 
 	# some sort of scaling information
 	scale = [.01,.01,.01]
 	if model.assetInfo != None and model.assetInfo.unitmeter != None:
-		print("This model contains units, %f %s per meter" % (model.assetInfo.unitmeter, model.assetInfo.unitname))
+		log.log_debug(1,"This model contains units, %f %s per meter" % \
+                      (model.assetInfo.unitmeter, model.assetInfo.unitname))
 		scale = model.assetInfo.unitmeter
 		scale = [scale, scale, scale]
 
-	t2v = Tri2Voxel(model)
+	t2v = Tri2Voxel(model, log)
 	t2v.scale = array(scale)
 	t2v.geom_prep(mins,maxs)
 
@@ -547,8 +566,8 @@ def main():
 	# Print some stats
 	ar1  = np.count_nonzero(t2v.arr3d_id)
 	ar01 = np.prod(t2v.arrdim)
-	print("%d/%d voxels filled (%.2f%% fill level)" % (ar1,ar01,100*ar1/ar01))
-	print("t2v reports %d voxels changed" % t2v.voxchg)
+	log.log_info("%d/%d voxels filled (%.2f%% fill level)" % (ar1,ar01,100*ar1/ar01))
+	log.log_info("t2v reports %d voxels changed" % t2v.voxchg)
 	
 	# Open MC level for pasting 
 	level = mclevel.fromFile(os.path.join(args.world,"level.dat"))
@@ -566,9 +585,8 @@ def main():
 		modelAltBase = int(voxtop + modelBaseLoc[2])
 		chunk = None
 	else:
-		print("Error: Unknown altitude mode in KML file.")
-		raise IOError
-	print("Model base altitude is %d meters (voxels)" % modelAltBase)
+		log.log_fatal("Unknown altitude mode in KML file.")
+	log.log_info("Model base altitude is %d meters (voxels)" % modelAltBase)
 	
 	# Compute new world height
 	worldheight = int(modelAltBase+t2v.arrdim[2])
@@ -580,8 +598,8 @@ def main():
 	worldheight += 1
 
 	if worldheight > level.Height:
-		print("World height increased from %d to %d" % \
-		      (level.Height,worldheight))
+		log.log_info("World height increased from %d to %d" % \
+		             (level.Height,worldheight))
 		level.Height = worldheight
 		level.root_tag["Data"]["worldHeight"] = nbt.TAG_Int(worldheight)
 	
@@ -624,9 +642,9 @@ def main():
 			# And mark the chunk.
 			chunk.chunkChanged()
 
-	print("Relighting level...")
+	log.log_info("Relighting level...")
 	level.generateLights()
-	print("Saving level...")
+	log.log_info("Saving level...")
 	level.saveInPlace()
 
 # Get running!
