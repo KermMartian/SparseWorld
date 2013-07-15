@@ -94,8 +94,12 @@ class Tri2Voxel:
 		# Step 4: Do some sort of preprocessing to find tm/ti/tt coordinates
 		txc = None
 		if tt and ti:
-			txs	= ti.uintarray.shape
-			txc = np.dot(tt[0],array([[txs[1],0],[0,txs[0]]]))
+			try:
+				txs	= ti.uintarray.shape
+				txc = np.dot(tt[0],array([[txs[1],0],[0,txs[0]]]))
+			except:
+				self.log.log_warn("Null texture coordinates; voxels for this triangle" \
+				                  " will be untextured.")
 
 		# Step 5: Iterate over this triangle
 		Linc = 1 /L
@@ -569,14 +573,15 @@ def main():
 	log.log_info("%d/%d voxels filled (%.2f%% fill level)" % (ar1,ar01,100*ar1/ar01))
 	log.log_info("t2v reports %d voxels changed" % t2v.voxchg)
 	
-	# Open MC level for pasting 
-	level = mclevel.fromFile(os.path.join(args.world,"level.dat"))
-
 	# Compute world-scaled altitude information
+	# This must be done after the level height is adjusted, otherwise one of the
+	# (loaded, cached) chunks will have an incorrect height.
 	if altmode == "absolute":
 		sealevel = myRegion['sealevel'] if 'sealevel' in myRegion else 64
 		modelAltBase = int(altitude * myRegion['vscale'] + sealevel)
 	elif altmode == "relativeToGround":
+		level = mclevel.fromFile(os.path.join(args.world,"level.dat"))
+
 		xbase = int(round(modelBaseLoc[0] + cornerBase[0]))
 		zbase = int(round(modelBaseLoc[1] + cornerBase[1]))
 		chunk = level.getChunk(int(xbase/16.), int(zbase/16.))
@@ -584,6 +589,9 @@ def main():
 		voxtop = [i for i, e in enumerate(voxcol) if e != 0][-1] + 1
 		modelAltBase = int(voxtop + modelBaseLoc[2])
 		chunk = None
+		level.close()
+		level = None
+
 	else:
 		log.log_fatal("Unknown altitude mode in KML file.")
 	log.log_info("Model base altitude is %d meters (voxels)" % modelAltBase)
@@ -597,16 +605,22 @@ def main():
 	worldheight |= worldheight >> 16
 	worldheight += 1
 
+	# Open MC level for computation
+	level = mclevel.fromFile(os.path.join(args.world,"level.dat"))
+
 	if worldheight > level.Height:
 		log.log_info("World height increased from %d to %d" % \
 		             (level.Height,worldheight))
 		level.Height = worldheight
 		level.root_tag["Data"]["worldHeight"] = nbt.TAG_Int(worldheight)
 	
+	# Figure out what chunks will be modified
 	chunksx = [int(np.floor(modelBaseLoc[0]/16.)), \
 	           int(np.floor((modelBaseLoc[0]+t2v.arrdim[0])/16.))]
 	chunksz = [int(np.floor(modelBaseLoc[1]/16.)), \
 	           int(np.floor((modelBaseLoc[1]+t2v.arrdim[1])/16.))]
+
+	# Modify the chunks with new building data
 	for x in xrange(chunksx[0], 1+chunksx[1]):
 		for z in xrange(chunksz[0], 1+chunksz[1]):
 
@@ -623,6 +637,10 @@ def main():
 			inp = chunk.Blocks[xmin:xmax,zmin:zmax, \
 			                   modelAltBase:(modelAltBase+t2v.arrdim[2])]
 
+			shapes = [t2v.arrdim[2], chunk.Data[xmin, zmin, modelAltBase:(modelAltBase+t2v.arrdim[2])].shape[0]]
+			if shapes[0] != shapes[1]:
+				log.log_fatal("Cannot store resulting model. Chunk (%d,%d) selected height %d does not match " \
+                              "model matrix height %d" % (x, z, shapes[0], shapes[1]))
 			# Data first because Blocks must retain its 0s
 			ind = chunk.Data[xmin:xmax,zmin:zmax, \
 			                 modelAltBase:(modelAltBase+t2v.arrdim[2])]
