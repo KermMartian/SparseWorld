@@ -16,6 +16,7 @@ import nbt
 import time					# For progress timing
 import argparse
 from klogger import klogger, klog_levels
+import utmll
 
 epsilon = 1e-5
 
@@ -503,6 +504,7 @@ def main():
 		log_level += args.verbosity
 	log = klogger(log_level)
 
+	# Name of the model that we'll be processing
 	filename = args.model
 
 	# Determine where to paste into target world
@@ -522,17 +524,22 @@ def main():
 	myRegion = yaml.safe_load(yamlfile)
 	yamlfile.close()
 
-	# Compute the world (x,y) for this model
+	# Check important things
+	if myRegion["scale"] != 1 or myRegion["vscale"] != 1:
+		log.log_fatal("Currently only scale=1 and vscale=1 are allowed")
+
+	# Compute the world utm (x,y) for this model. Oddly enough, we can use these
+	# coordinates directly (for the 1:1 scale case. This script just handles that)
 	llextents = myRegion['wgs84extents']['elevation']
-	metersPerLat =  (myRegion['tiles']['ymax'] - myRegion['tiles']['ymin']) * myRegion['tilesize']
-	metersPerLat /= (llextents['ymax'] - llextents['ymin'])
-	metersPerLon =  (myRegion['tiles']['xmax'] - myRegion['tiles']['xmin']) * myRegion['tilesize']
-	metersPerLon /= (llextents['xmax'] - llextents['xmin'])
-	modelBaseLoc = [ myRegion['tiles']['xmin'] * myRegion['tilesize'] + \
-	                 ((longitude - llextents['xmin']) * metersPerLon), \
-	                 myRegion['tiles']['ymax'] * myRegion['tilesize'] - \
-	                 ((latitude  - llextents['ymin']) * metersPerLat), 0 ]	#Because Minecraft maps are flipped upside-down
-	log.log_debug(1,"Loc: %f,%f => %d,%d within %s" % (latitude, longitude, modelBaseLoc[0], modelBaseLoc[1], str(llextents)))
+	easting, northing, utmzone, utmletter = utmll.from_latlon(latitude, longitude)
+	northing = (myRegion['tiles']['ymin'] + myRegion['tiles']['ymax']) * myRegion['tilesize'] \
+	           - northing
+	log.log_debug(1, "Base easting = %d, northing = %d in UTM Zone %d%s" % \
+	                 (easting, northing, utmzone, utmletter))
+	modelBaseLoc = [easting, northing, 0]
+
+	log.log_debug(1,"Loc: %f,%f => %d,%d within %s" % \
+                  (latitude, longitude, modelBaseLoc[0], modelBaseLoc[1], str(llextents)))
 
 	# Open the model and determine its extents
 	model = collada.Collada(filename, ignore=[collada.DaeUnsupportedError,
