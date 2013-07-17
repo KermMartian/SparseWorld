@@ -628,41 +628,50 @@ def main():
 	           int(np.floor((modelBaseLoc[1]+t2v.arrdim[1])/16.))]
 
 	# Modify the chunks with new building data
-	for x in xrange(chunksx[0], 1+chunksx[1]):
-		for z in xrange(chunksz[0], 1+chunksz[1]):
+	for x in xrange(chunksx[0], 1 + chunksx[1]):
+		for z in xrange(chunksz[0], 1 + chunksz[1]):
 
+			# Chunk sub-selection
 			chunk = level.getChunk(x,z)
-			xmin = max(0,modelBaseLoc[0]-16*x)
-			xmax = min(16,t2v.arrdim[0]+16*(chunksx[0]-x))
-			zmin = max(0,modelBaseLoc[1]-16*z)
-			zmax = min(16,t2v.arrdim[1]+16*(chunksz[0]-z))
+			xmin = max(0, modelBaseLoc[0] - 16 * x)
+			xmax = min(16, t2v.arrdim[0] + modelBaseLoc[0] - 16 * x)
+			zmin = max(0, modelBaseLoc[1] - 16 * z)
+			zmax = min(16, t2v.arrdim[1] + modelBaseLoc[1] - 16 * z)
 
+			# Model sub-selection
+			mxmin = (16 * x) + xmin - modelBaseLoc[0]
+			mzmin = (16 * z) + zmin - modelBaseLoc[1]
+
+			log.log_debug(2,"Copying region %d,%d,%d to %d,%d,%d" % \
+			      (xmin,modelAltBase,zmin,xmax,(modelAltBase+t2v.arrdim[2]),zmax))
+			log.log_debug(2,"From model %d,%d,%d to %d,%d,%d" % \
+			      (mxmin,0,mzmin,mxmin+(xmax-xmin),t2v.arrdim[2],mzmin+(zmax-zmin)))
 			if xmax <= 0 or zmax <= 0:
+				log.log_debug(1,"Skipping out-of-bounds copy")
 				continue;
 
-			#print("Copying %d,%d,%d to %d,%d,%d" % (xmin,modelAltBase,zmin,xmax,(modelAltBase+t2v.arrdim[2]),zmax))
-			inp = chunk.Blocks[xmin:xmax,zmin:zmax, \
-			                   modelAltBase:(modelAltBase+t2v.arrdim[2])]
-
+			# Checking to make sure numpy isn't going to pitch a fit
 			shapes = [t2v.arrdim[2], chunk.Data[xmin, zmin, modelAltBase:(modelAltBase+t2v.arrdim[2])].shape[0]]
 			if shapes[0] != shapes[1]:
 				log.log_fatal("Cannot store resulting model. Chunk (%d,%d) selected height %d does not match " \
                               "model matrix height %d" % (x, z, shapes[0], shapes[1]))
+
+			inp = chunk.Blocks[xmin:xmax,zmin:zmax, \
+			                   modelAltBase:(modelAltBase+t2v.arrdim[2])]
+
 			# Data first because Blocks must retain its 0s
 			ind = chunk.Data[xmin:xmax,zmin:zmax, \
 			                 modelAltBase:(modelAltBase+t2v.arrdim[2])]
 			chunk.Data[xmin:xmax,zmin:zmax, \
 			           modelAltBase:(modelAltBase+t2v.arrdim[2])] = \
 			np.where(inp != 0, ind, \
-			         t2v.arr3d_dt[(16*(x-chunksx[0])):(16*(x-chunksx[0])+(xmax-xmin)), \
-			         (16*(z-chunksz[0])):(16*(z-chunksz[0])+(zmax-zmin)),:])
+			         t2v.arr3d_dt[mxmin:mxmin + (xmax-xmin), mzmin:mzmin + (zmax-zmin), :])
 
 			# Blocks second.
 			chunk.Blocks[xmin:xmax,zmin:zmax, \
 			             modelAltBase:(modelAltBase+t2v.arrdim[2])] = \
 			np.where(inp != 0, inp, \
-			         t2v.arr3d_id[(16*(x-chunksx[0])):(16*(x-chunksx[0])+(xmax-xmin)), \
-			         (16*(z-chunksz[0])):(16*(z-chunksz[0])+(zmax-zmin)),:])
+			         t2v.arr3d_id[mxmin:mxmin + (xmax-xmin), mzmin:mzmin + (zmax-zmin), :])
 
 			# And mark the chunk.
 			chunk.chunkChanged()

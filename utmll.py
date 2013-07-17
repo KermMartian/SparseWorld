@@ -31,6 +31,9 @@ ZONE_LETTERS = [
 	(-72, 'D'), (-80, 'C')
 ]
 
+ZONE_IDS_NORTH_BASE = 32600
+ZONE_IDS_SOUTH_BASE = 32700
+
 def to_latlon(easting, northing, zone_number, zone_letter):
 	zone_letter = zone_letter.upper()
 
@@ -167,6 +170,12 @@ def latlon_to_zone_number(latitude, longitude):
 
 	return int((longitude + 180) / 6) + 1
 
+def latlon_to_zone_identifier(latitude, longitude):
+	zone_number = latlon_to_zone_number(latitude, longitude)
+	if latitude < 0:
+		return ZONE_IDS_SOUTH_BASE + zone_number
+	else:
+		return ZONE_IDS_NORTH_BASE + zone_number
 
 def zone_number_to_central_longitude(zone_number):
 	return (zone_number - 1) * 6 - 180 + 3
