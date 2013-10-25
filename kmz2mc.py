@@ -506,17 +506,28 @@ def main():
 
 	# Name of the model that we'll be processing
 	filename = args.model
+	log.log_info("Converting %s and placing into %s" % \
+	             (os.path.basename(filename), os.path.basename(args.world)))
 
 	# Determine where to paste into target world
 	zipf = zipfile.ZipFile(args.model, 'r')
 	kmldata = minidom.parse(zipf.open('doc.kml'))
 	zipf = None
+
+	# Determine location information
 	location = kmldata.getElementsByTagName('Location')[0]
 	latitude  = float(location.getElementsByTagName('latitude')[0].childNodes[0].data)
 	longitude = float(location.getElementsByTagName('longitude')[0].childNodes[0].data)
 	altmode   = str(kmldata.getElementsByTagName('altitudeMode')[0].childNodes[0].data)
 	altitude  = float(location.getElementsByTagName('altitude')[0].childNodes[0].data)
+
+	# Determine orientation information
+	orientation = kmldata.getElementsByTagName('Orientation')[0]
+	heading = float(orientation.getElementsByTagName('heading')[0].childNodes[0].data)
 	kmldata = None
+	if abs(heading) > 1.0:
+		log.log_fatal("Model specifies heading of %f, but this script does" \
+		              " not support model rotation" % heading)
 	
 	# Get information about the target world
 	yamlfile = open(os.path.join(args.world, 'Region.yaml'), 'r')
@@ -538,7 +549,7 @@ def main():
 	                 (easting, northing, utmzone, utmletter))
 	modelBaseLoc = [easting, northing, 0]
 
-	log.log_debug(1,"Loc: %f,%f => %d,%d within %s" % \
+	log.log_debug(1,"Loc: %.10f,%.10f => %d,%d within %s" % \
                   (latitude, longitude, modelBaseLoc[0], modelBaseLoc[1], str(llextents)))
 
 	# Open the model and determine its extents
@@ -565,12 +576,17 @@ def main():
 
 	# Use extents and modelBaseLoc to compute the world coordinate that
 	# corresponds to the output array's [0,0,0]
-	cornerBase = t2v.tvoffset[0] * t2v.tvscale[0]
+	#cornerBase = t2v.tvoffset[0] * t2v.tvscale[0]
+	cornerBase = np.multiply(t2v.scale,array([ -mins[0], maxs[1], 0]))
 	modelBaseLoc -= cornerBase
 	modelBaseLoc = [round(x) for x in modelBaseLoc]
+	log.log_debug(2,"cornerBase is %s, yielding modelBaseLoc of %s" % \
+	              (str(cornerBase), str(modelBaseLoc)))
 
-	# Convert and fix orientation
+	# Convert
 	mr.recurse_model(model,"convert",t2v)		# Do the conversion!
+
+	# Fix orientation
 	t2v.arr3d_id = np.fliplr(t2v.arr3d_id)		# Fix block ID array
 	t2v.arr3d_dt = np.fliplr(t2v.arr3d_dt)		# Fix damage val array
 
@@ -616,10 +632,12 @@ def main():
 	level = mclevel.fromFile(os.path.join(args.world,"level.dat"))
 
 	if worldheight > level.Height:
-		log.log_info("World height increased from %d to %d" % \
+		log.log_info("World height increased from %d to %d meters" % \
 		             (level.Height,worldheight))
 		level.Height = worldheight
 		level.root_tag["Data"]["worldHeight"] = nbt.TAG_Int(worldheight)
+	else:
+		log.log_info("World height unmodified at %d meters" % worldheight);
 	
 	# Figure out what chunks will be modified
 	chunksx = [int(np.floor(modelBaseLoc[0]/16.)), \
